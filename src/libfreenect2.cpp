@@ -1175,6 +1175,8 @@ Freenect2Device *Freenect2Impl::openDevice(int idx, const PacketPipeline *pipeli
 {
   int num_devices = getNumDevices();
   Freenect2DeviceImpl *device = 0;
+  const char *disable_reset_env = std::getenv("LIBFREENECT2_DISABLE_RESET");
+  const bool disable_reset = disable_reset_env != 0 && disable_reset_env[0] != '\0' && disable_reset_env[0] != '0';
 
   if(idx >= num_devices)
   {
@@ -1216,11 +1218,11 @@ Freenect2Device *Freenect2Impl::openDevice(int idx, const PacketPipeline *pipeli
     return device;
   }
 
-  if(attempting_reset)
+  if(attempting_reset && !disable_reset)
   {
     r = libusb_reset_device(dev_handle);
 
-    if(r == LIBUSB_ERROR_NOT_FOUND)
+    if(r == LIBUSB_ERROR_NOT_FOUND || r == LIBUSB_ERROR_NO_DEVICE)
     {
       // From libusb documentation:
       // "If the reset fails, the descriptors change, or the previous state
@@ -1249,11 +1251,15 @@ Freenect2Device *Freenect2Impl::openDevice(int idx, const PacketPipeline *pipeli
     }
     else if(r != LIBUSB_SUCCESS)
     {
-      LOG_ERROR << "failed to reset Kinect v2: " << PrintBusAndDevice(dev.dev, r);
-      delete pipeline;
-
-      return device;
+      // Reset is a best-effort workaround for devices in a bad state.
+      // Continue without reset so callers can still try to open/stream.
+      LOG_WARNING << "failed to reset Kinect v2, continuing without reset: "
+                  << PrintBusAndDevice(dev.dev, r);
     }
+  }
+  else if(attempting_reset && disable_reset)
+  {
+    LOG_INFO << "skipping device reset due to LIBFREENECT2_DISABLE_RESET=" << disable_reset_env;
   }
 
   device = new Freenect2DeviceImpl(this, pipeline, dev.dev, dev_handle, dev.serial);

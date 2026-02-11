@@ -26,6 +26,7 @@
 
 #include "streamer.h"
 #include <cstdlib>
+#include <algorithm>
 
 void Streamer::initialize()
 {
@@ -36,7 +37,7 @@ void Streamer::initialize()
   servAddress = SERVER_ADDRESS;
   servPort = Socket::resolveService(SERVER_PORT, "udp"); // Server port
 
-  compression_params.push_back(CV_IMWRITE_JPEG_QUALITY);
+  compression_params.push_back(cv::IMWRITE_JPEG_QUALITY);
   compression_params.push_back(jpegqual);
 }
 
@@ -44,9 +45,35 @@ void Streamer::stream(libfreenect2::Frame* frame)
 {
   try
   {
-    // int total_pack = 1 + (encoded.size() - 1) / PACK_SIZE;
-    cv::Mat frame_depth = cv::Mat(frame->height, frame->width, CV_32FC1, frame->data) / 10;
-    cv::imencode(".jpg", frame_depth, encoded, compression_params);
+    cv::Mat frame_for_encode;
+    if (frame->format == libfreenect2::Frame::Float)
+    {
+      frame_for_encode = cv::Mat(frame->height, frame->width, CV_32FC1, frame->data) / 10;
+    }
+    else if (frame->bytes_per_pixel == 4)
+    {
+      cv::Mat frame_4ch(frame->height, frame->width, CV_8UC4, frame->data);
+      const int conversion_code = (frame->format == libfreenect2::Frame::RGBX)
+        ? cv::COLOR_RGBA2BGR
+        : cv::COLOR_BGRA2BGR;
+      cv::cvtColor(frame_4ch, frame_for_encode, conversion_code);
+    }
+    else if (frame->bytes_per_pixel == 1)
+    {
+      frame_for_encode = cv::Mat(frame->height, frame->width, CV_8UC1, frame->data);
+    }
+    else
+    {
+      std::cerr << "Unsupported frame format for streaming. bpp=" << frame->bytes_per_pixel
+                << " format=" << frame->format << std::endl;
+      return;
+    }
+
+    cv::imencode(".jpg", frame_for_encode, encoded, compression_params);
+    if (encoded.empty())
+    {
+      return;
+    }
 
     // resize image
     // resize(frame, encoded, Size(FRAME_WIDTH, FRAME_HEIGHT), 0, 0, INTER_LINEAR);
@@ -64,7 +91,12 @@ void Streamer::stream(libfreenect2::Frame* frame)
 
     // send image data packet
     for(int i = 0; i < total_pack; i++)
-      sock.sendTo( & encoded[i * PACK_SIZE], PACK_SIZE, servAddress, servPort);
+    {
+      const size_t offset = static_cast<size_t>(i) * PACK_SIZE;
+      const size_t remaining = encoded.size() - offset;
+      const size_t chunk_size = std::min(static_cast<size_t>(PACK_SIZE), remaining);
+      sock.sendTo(&encoded[offset], static_cast<int>(chunk_size), servAddress, servPort);
+    }
   }
   catch (SocketException & e)
   {

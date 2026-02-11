@@ -470,7 +470,14 @@ int main(int argc, char *argv[])
 
     if (streamer_enabled)
     {
-      streamer.stream(depth);
+      if (enable_rgb && rgb != NULL)
+      {
+        streamer.stream(rgb);
+      }
+      else if (depth != NULL)
+      {
+        streamer.stream(depth);
+      }
     }
 
     if (recorder_enabled)
