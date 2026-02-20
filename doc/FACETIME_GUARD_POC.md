@@ -121,6 +121,13 @@ DETECT_DEBUG=1 ./tools/facetime_guard/facetime_voice_accept.sh --no-tts
     - 안내 문구와 유사한 전사는 자동 무시(`SUPPRESS_ANNOUNCE_ECHO=1`)
     - TTS 재생 중 비키워드 전사는 빠른 재시도(`ATTEMPT_COOLDOWN_DURING_TTS_SECONDS`, 기본 1초)
     - 빈 전사는 짧은 쿨다운(`ATTEMPT_COOLDOWN_EMPTY_SECONDS`, 기본 1초)
+    - 반복/노이즈 전사 무시:
+      - 반복 전사 무시(`REPEAT_TRANSCRIPT_WINDOW_SECONDS`, `ATTEMPT_COOLDOWN_REPEAT_SECONDS`)
+      - `Thank you/감사합니다`류 전사 무시(`ATTEMPT_COOLDOWN_NOISE_SECONDS`)
+      - 비한글 전사 무시(`SUPPRESS_NON_KOREAN_TRANSCRIPT=1`)
+  - 오탐/클릭 보정:
+    - `PID+GREEN` 감지 최소 green 카운트 (`MIN_GREEN_COUNT_PID_GREEN`, 기본 3200)
+    - 수락 클릭 1회 자동 재시도 (`ACCEPT_CLICK_MAX_TRIES=2`, `ACCEPT_CLICK_RETRY_X_DELTA/Y_DELTA`)
 - STT 백엔드:
   - `STT_BACKEND=shortcuts` (기존)
   - `STT_BACKEND=vllm` (권장: TTS/STT 동시 처리 안정화)
@@ -136,7 +143,8 @@ DETECT_DEBUG=1 ./tools/facetime_guard/facetime_voice_accept.sh --no-tts
     - `VLLM_STT_MODEL` (`--stt-model`로 명시 시 프로필보다 우선)
     - `VLLM_STT_LANGUAGE` (기본 `ko`)
     - `VLLM_AUDIO_DEVICE` (기본 `0`, avfoundation 오디오 인덱스)
-    - `VLLM_CAPTURE_SECONDS` (기본 `2.5`)
+    - `VLLM_CAPTURE_SECONDS` (기본 `1.4`)
+    - `VLLM_CAPTURE_SECONDS_DURING_TTS` (기본 `1.0`)
 - 수신 성공 판정:
   - 단순 클릭 성공을 수신 성공으로 보지 않음
   - 클릭 후 `--detect` 재확인에서 `RINGING` 해제 연속 관측 시에만 성공 처리

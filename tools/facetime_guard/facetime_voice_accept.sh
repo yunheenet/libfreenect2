@@ -17,17 +17,27 @@ VLLM_BASE_URL="${VLLM_BASE_URL:-http://127.0.0.1:8000}"
 VLLM_STT_PROFILE="${VLLM_STT_PROFILE:-ko-fast}"
 VLLM_STT_MODEL="${VLLM_STT_MODEL:-}"
 VLLM_STT_LANGUAGE="${VLLM_STT_LANGUAGE:-}"
-VLLM_CAPTURE_SECONDS="${VLLM_CAPTURE_SECONDS:-2.5}"
+VLLM_CAPTURE_SECONDS="${VLLM_CAPTURE_SECONDS:-1.4}"
+VLLM_CAPTURE_SECONDS_DURING_TTS="${VLLM_CAPTURE_SECONDS_DURING_TTS:-1.0}"
 VLLM_AUDIO_DEVICE="${VLLM_AUDIO_DEVICE:-0}"
 VLLM_HTTP_TIMEOUT_SECONDS="${VLLM_HTTP_TIMEOUT_SECONDS:-25}"
 ANNOUNCE_TEXT="${ANNOUNCE_TEXT:-영상통화가 왔습니다. 받으시려면 '전화받아'를 말씀해주세요.}"
 ANNOUNCE_TEXT_CALLER_TEMPLATE="${ANNOUNCE_TEXT_CALLER_TEMPLATE:-%s에게 영상통화가 왔습니다. 받으시려면 '전화받아'를 말씀해주세요.}"
 DETECT_DEBUG="${DETECT_DEBUG:-0}"
 RING_CLEAR_IDLE_COUNT="${RING_CLEAR_IDLE_COUNT:-4}"
-ATTEMPT_COOLDOWN_SECONDS="${ATTEMPT_COOLDOWN_SECONDS:-4}"
+ATTEMPT_COOLDOWN_SECONDS="${ATTEMPT_COOLDOWN_SECONDS:-2}"
 ATTEMPT_COOLDOWN_DURING_TTS_SECONDS="${ATTEMPT_COOLDOWN_DURING_TTS_SECONDS:-1}"
 ATTEMPT_COOLDOWN_EMPTY_SECONDS="${ATTEMPT_COOLDOWN_EMPTY_SECONDS:-1}"
+ATTEMPT_COOLDOWN_NOISE_SECONDS="${ATTEMPT_COOLDOWN_NOISE_SECONDS:-0}"
+ATTEMPT_COOLDOWN_REPEAT_SECONDS="${ATTEMPT_COOLDOWN_REPEAT_SECONDS:-0}"
+ATTEMPT_COOLDOWN_AFTER_UNVERIFIED_CLICK_SECONDS="${ATTEMPT_COOLDOWN_AFTER_UNVERIFIED_CLICK_SECONDS:-1}"
 SUPPRESS_ANNOUNCE_ECHO="${SUPPRESS_ANNOUNCE_ECHO:-1}"
+SUPPRESS_NON_KOREAN_TRANSCRIPT="${SUPPRESS_NON_KOREAN_TRANSCRIPT:-1}"
+MIN_GREEN_COUNT_PID_GREEN="${MIN_GREEN_COUNT_PID_GREEN:-3200}"
+REPEAT_TRANSCRIPT_WINDOW_SECONDS="${REPEAT_TRANSCRIPT_WINDOW_SECONDS:-8}"
+ACCEPT_CLICK_MAX_TRIES="${ACCEPT_CLICK_MAX_TRIES:-2}"
+ACCEPT_CLICK_RETRY_X_DELTA="${ACCEPT_CLICK_RETRY_X_DELTA:-18}"
+ACCEPT_CLICK_RETRY_Y_DELTA="${ACCEPT_CLICK_RETRY_Y_DELTA:-10}"
 POST_ACCEPT_HOLDOFF_SECONDS="${POST_ACCEPT_HOLDOFF_SECONDS:-20}"
 ACCEPT_VERIFY_TIMEOUT_SECONDS="${ACCEPT_VERIFY_TIMEOUT_SECONDS:-6}"
 ACCEPT_VERIFY_POLL_SECONDS="${ACCEPT_VERIFY_POLL_SECONDS:-0.4}"
@@ -51,10 +61,13 @@ Options:
 Environment overrides:
   KEYWORD, SHORTCUT_NAME, STT_BACKEND, POLL_SECONDS, COOLDOWN_SECONDS, ENABLE_TTS, ANNOUNCE_TEXT, DETECT_DEBUG,
   TTS_ASYNC, ANNOUNCE_TEXT_CALLER_TEMPLATE, RING_CLEAR_IDLE_COUNT, ATTEMPT_COOLDOWN_SECONDS,
-  ATTEMPT_COOLDOWN_DURING_TTS_SECONDS, ATTEMPT_COOLDOWN_EMPTY_SECONDS, SUPPRESS_ANNOUNCE_ECHO,
+  ATTEMPT_COOLDOWN_DURING_TTS_SECONDS, ATTEMPT_COOLDOWN_EMPTY_SECONDS, ATTEMPT_COOLDOWN_NOISE_SECONDS,
+  ATTEMPT_COOLDOWN_REPEAT_SECONDS, ATTEMPT_COOLDOWN_AFTER_UNVERIFIED_CLICK_SECONDS, SUPPRESS_ANNOUNCE_ECHO,
+  SUPPRESS_NON_KOREAN_TRANSCRIPT, MIN_GREEN_COUNT_PID_GREEN, REPEAT_TRANSCRIPT_WINDOW_SECONDS,
+  ACCEPT_CLICK_MAX_TRIES, ACCEPT_CLICK_RETRY_X_DELTA, ACCEPT_CLICK_RETRY_Y_DELTA,
   POST_ACCEPT_HOLDOFF_SECONDS, ACCEPT_VERIFY_TIMEOUT_SECONDS, ACCEPT_VERIFY_POLL_SECONDS, ACCEPT_VERIFY_CLEAR_COUNT,
   VLLM_BASE_URL, VLLM_STT_PROFILE, VLLM_STT_MODEL, VLLM_STT_LANGUAGE, VLLM_CAPTURE_SECONDS, VLLM_AUDIO_DEVICE,
-  VLLM_HTTP_TIMEOUT_SECONDS
+  VLLM_CAPTURE_SECONDS_DURING_TTS, VLLM_HTTP_TIMEOUT_SECONDS
 USAGE
 }
 
@@ -194,10 +207,38 @@ normalize_text() {
   printf '%s' "$1" | tr -d '[:space:]'
 }
 
+normalize_ascii_compact() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:][:punct:]'
+}
+
 contains_keyword() {
   local transcript_norm="$1"
   local keyword_norm="$2"
   [[ -n "${transcript_norm}" && -n "${keyword_norm}" && "${transcript_norm}" == *"${keyword_norm}"* ]]
+}
+
+contains_hangul() {
+  local text="$1"
+  [[ "${text}" =~ [가-힣] ]]
+}
+
+is_known_noise_transcript() {
+  local transcript="$1"
+  local compact ascii_compact
+  compact="$(normalize_text "${transcript}")"
+  ascii_compact="$(normalize_ascii_compact "${transcript}")"
+  if [[ -z "${compact}" ]]; then
+    return 1
+  fi
+  if [[ "${ascii_compact}" == *"thankyou"* || "${ascii_compact}" == *"thanks"* ]]; then
+    return 0
+  fi
+  case "${compact}" in
+    감사합니다|고마워|고마워요|다음영상에서만나요|영상통화가완료되었습니다*)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 clean_caller() {
@@ -235,6 +276,7 @@ run_stt_shortcuts() {
 }
 
 run_stt_vllm() {
+  local capture_seconds="${1:-${VLLM_CAPTURE_SECONDS}}"
   local tmp_base wav_file json_file log_file input_spec rc http_code err_msg
   tmp_base="$(mktemp -t facetime_guard_stt)"
   wav_file="${tmp_base}.wav"
@@ -245,13 +287,13 @@ run_stt_vllm() {
   rc=0
   ffmpeg -nostdin -loglevel error -y \
     -f avfoundation -i "${input_spec}" \
-    -t "${VLLM_CAPTURE_SECONDS}" \
+    -t "${capture_seconds}" \
     -ac 1 -ar 16000 \
     -f wav "${wav_file}" \
     2>"${log_file}" || rc=$?
   if [[ ${rc} -ne 0 ]]; then
     if [[ "${DETECT_DEBUG}" == "1" ]]; then
-      echo "DEBUG vllm-stt capture failed rc=${rc} device='${input_spec}' sec=${VLLM_CAPTURE_SECONDS}" >&2
+      echo "DEBUG vllm-stt capture failed rc=${rc} device='${input_spec}' sec=${capture_seconds}" >&2
       sed -n '1,80p' "${log_file}" >&2 || true
     fi
     rm -f "${wav_file}" "${json_file}" "${log_file}" "${tmp_base}"
@@ -358,13 +400,21 @@ if [[ "${STT_BACKEND}" == "vllm" ]]; then
   verify_vllm_server || exit 1
 fi
 
+select_vllm_capture_seconds() {
+  if is_tts_running; then
+    printf '%s' "${VLLM_CAPTURE_SECONDS_DURING_TTS}"
+  else
+    printf '%s' "${VLLM_CAPTURE_SECONDS}"
+  fi
+}
+
 run_stt_once() {
   case "${STT_BACKEND}" in
     shortcuts)
       run_stt_shortcuts
       ;;
     vllm)
-      run_stt_vllm
+      run_stt_vllm "$(select_vllm_capture_seconds)"
       ;;
     *)
       return 2
@@ -413,6 +463,45 @@ tts_pid=""
 
 is_tts_running() {
   [[ -n "${tts_pid}" ]] && kill -0 "${tts_pid}" >/dev/null 2>&1
+}
+
+add_float() {
+  local base="$1"
+  local delta="$2"
+  awk -v a="${base}" -v b="${delta}" 'BEGIN { printf "%.1f", (a + b) }'
+}
+
+click_and_verify_with_retries() {
+  local base_x="$1"
+  local base_y="$2"
+  local x="${base_x}"
+  local y="${base_y}"
+  local tries="${ACCEPT_CLICK_MAX_TRIES}"
+  local i
+
+  if [[ "${tries}" -lt 1 ]]; then
+    tries=1
+  fi
+
+  for ((i = 1; i <= tries; ++i)); do
+    if [[ "${i}" -gt 1 ]]; then
+      x="$(add_float "${base_x}" "${ACCEPT_CLICK_RETRY_X_DELTA}")"
+      y="$(add_float "${base_y}" "${ACCEPT_CLICK_RETRY_Y_DELTA}")"
+      echo "Retry click ${i}/${tries} at offset point: (${x},${y})"
+    else
+      echo "Clicking locked point: (${x},${y})"
+    fi
+
+    if ! "${BIN}" --click "${x}" "${y}" >/dev/null 2>&1; then
+      continue
+    fi
+    if verify_call_accepted_after_click; then
+      session_click_x="${x}"
+      session_click_y="${y}"
+      return 0
+    fi
+  done
+  return 1
 }
 
 stop_tts() {
@@ -482,13 +571,15 @@ session_click_x=""
 session_click_y=""
 session_announce_text=""
 keyword_norm="$(normalize_text "${KEYWORD}")"
+last_transcript_norm=""
+last_transcript_seen_at=0
 
 echo "FaceTime guard started."
 echo "Keyword='${KEYWORD}' Poll=${POLL_SECONDS}s STT backend='${STT_BACKEND}'"
 if [[ "${STT_BACKEND}" == "shortcuts" ]]; then
   echo "Shortcuts name='${SHORTCUT_NAME}'"
 else
-  echo "vLLM STT profile='${VLLM_STT_PROFILE}' model='${VLLM_STT_MODEL}' base_url='${VLLM_BASE_URL}' device='${VLLM_AUDIO_DEVICE}' capture=${VLLM_CAPTURE_SECONDS}s"
+  echo "vLLM STT profile='${VLLM_STT_PROFILE}' model='${VLLM_STT_MODEL}' base_url='${VLLM_BASE_URL}' device='${VLLM_AUDIO_DEVICE}' capture_idle=${VLLM_CAPTURE_SECONDS}s capture_tts=${VLLM_CAPTURE_SECONDS_DURING_TTS}s"
 fi
 echo "Press Ctrl-C to stop."
 
@@ -546,6 +637,14 @@ while true; do
     fi
     caller="$(clean_caller "${caller_raw:-}")"
 
+    if [[ "${source}" == "PID+GREEN" ]] && [[ "${green_count}" =~ ^[0-9]+$ ]] && [[ "${green_count}" -lt "${MIN_GREEN_COUNT_PID_GREEN}" ]]; then
+      if [[ "${DETECT_DEBUG}" == "1" || "${ring_latched}" -eq 0 ]]; then
+        echo "Ignoring weak PID+GREEN detection (green=${green_count} < ${MIN_GREEN_COUNT_PID_GREEN})."
+      fi
+      sleep "${POLL_SECONDS}"
+      continue
+    fi
+
     event_key="${source}:${owner}:${wid}"
     if [[ "${ring_latched}" -eq 0 || "${event_key}" != "${ring_session_key}" ]]; then
       ring_latched=1
@@ -589,29 +688,27 @@ while true; do
       next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_SECONDS))
     else
       echo "Transcript: ${transcript}"
+      now_ts="$(date +%s)"
       transcript_norm="$(normalize_text "${transcript}")"
       if contains_keyword "${transcript_norm}" "${keyword_norm}"; then
         stop_tts
-        echo "Clicking locked point: (${session_click_x},${session_click_y})"
-        if "${BIN}" --click "${session_click_x}" "${session_click_y}" >/dev/null 2>&1; then
-          if verify_call_accepted_after_click; then
-            echo "Accepted call by voice keyword (verified)."
-            handled_in_session=1
-            now_ts="$(date +%s)"
-            next_attempt_at=$((now_ts + COOLDOWN_SECONDS))
-            post_accept_holdoff_until=$((now_ts + POST_ACCEPT_HOLDOFF_SECONDS))
-          else
-            echo "Click sent but acceptance not verified (still ringing)."
-            now_ts="$(date +%s)"
-            next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_SECONDS))
-          fi
+        if click_and_verify_with_retries "${session_click_x}" "${session_click_y}"; then
+          echo "Accepted call by voice keyword (verified)."
+          handled_in_session=1
+          now_ts="$(date +%s)"
+          next_attempt_at=$((now_ts + COOLDOWN_SECONDS))
+          post_accept_holdoff_until=$((now_ts + POST_ACCEPT_HOLDOFF_SECONDS))
         else
-          echo "Detected keyword but click failed."
-          next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_SECONDS))
+          echo "Click sent but acceptance not verified (still ringing)."
+          now_ts="$(date +%s)"
+          next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_AFTER_UNVERIFIED_CLICK_SECONDS))
         fi
       elif [[ -z "${transcript_norm}" ]]; then
         echo "Transcript empty."
         next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_EMPTY_SECONDS))
+      elif [[ -n "${last_transcript_norm}" && "${transcript_norm}" == "${last_transcript_norm}" && $((now_ts - last_transcript_seen_at)) -le ${REPEAT_TRANSCRIPT_WINDOW_SECONDS} ]]; then
+        echo "Ignored repeated transcript."
+        next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_REPEAT_SECONDS))
       elif is_probable_tts_echo "${transcript}" "${session_announce_text}"; then
         if [[ "${DETECT_DEBUG}" == "1" ]]; then
           echo "DEBUG suppressing probable TTS echo transcript."
@@ -619,12 +716,22 @@ while true; do
           echo "Ignored probable TTS echo."
         fi
         next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_DURING_TTS_SECONDS))
+      elif is_known_noise_transcript "${transcript}"; then
+        echo "Ignored known noise transcript."
+        next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_NOISE_SECONDS))
+      elif [[ "${SUPPRESS_NON_KOREAN_TRANSCRIPT}" == "1" ]] && ! contains_hangul "${transcript}"; then
+        echo "Ignored non-Korean transcript."
+        next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_NOISE_SECONDS))
       elif is_tts_running; then
         echo "TTS active, retrying STT quickly."
         next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_DURING_TTS_SECONDS))
       else
         echo "Keyword not matched."
         next_attempt_at=$((now_ts + ATTEMPT_COOLDOWN_SECONDS))
+      fi
+      if [[ -n "${transcript_norm}" ]]; then
+        last_transcript_norm="${transcript_norm}"
+        last_transcript_seen_at="${now_ts}"
       fi
     fi
   fi
