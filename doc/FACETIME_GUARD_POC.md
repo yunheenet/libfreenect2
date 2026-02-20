@@ -42,6 +42,10 @@ cd /Users/yuni/Dev/libfreenect2
 - `RINGING ...` : 수신 카드 감지
 - `IDLE` : 미감지
 
+`RINGING` 포맷:
+- `RINGING\twid\towner\tclickX\tclickY\tgreen\tred\thint\tsource\tcaller`
+- `caller`는 감지 시 추정한 발신자 이름(실패 시 `UNKNOWN`)
+
 디버그:
 
 ```bash
@@ -66,6 +70,27 @@ FACETIME_GUARD_GREEN_LOCAL_THRESHOLD=750 /Users/yuni/Dev/libfreenect2/build/bin/
 FACETIME_GUARD_FALLBACK_OFFSET_X=20 FACETIME_GUARD_FALLBACK_OFFSET_Y=-1 /Users/yuni/Dev/libfreenect2/build/bin/facetime_guard --debug-detect
 ```
 
+발신자 OCR ROI 튜닝(`PID+GREEN` 경로):
+
+```bash
+FACETIME_GUARD_CALLER_ROI_W=760 FACETIME_GUARD_CALLER_ROI_H=220 FACETIME_GUARD_CALLER_ROI_ANCHOR_X=0.72 FACETIME_GUARD_CALLER_ROI_ANCHOR_Y=0.20 /Users/yuni/Dev/libfreenect2/build/bin/facetime_guard --debug-detect
+```
+
+OCR 읽기 영역 가이드 확인:
+
+```bash
+DETECT_DEBUG=1 FACETIME_GUARD_DEBUG_ROI_DIR=/tmp/facetime_guard_roi /Users/yuni/Dev/libfreenect2/build/bin/facetime_guard --debug-detect
+```
+
+- 로그에 `GUIDE caller-name/r1/r2/r3 rect=...`가 출력됨
+- `/tmp/facetime_guard_roi/caller_name.png`, `caller_r1.png` 등 실제 OCR 대상 이미지가 저장됨
+
+발신자 이름 전용 ROI 튜닝:
+
+```bash
+FACETIME_GUARD_CALLER_NAME_W=380 FACETIME_GUARD_CALLER_NAME_H=105 FACETIME_GUARD_CALLER_NAME_OFFSET_X=330 FACETIME_GUARD_CALLER_NAME_OFFSET_Y=34 /Users/yuni/Dev/libfreenect2/build/bin/facetime_guard --debug-detect
+```
+
 ## 상시 실행
 
 ```bash
@@ -85,6 +110,12 @@ DETECT_DEBUG=1 ./tools/facetime_guard/facetime_voice_accept.sh --no-tts
 - `IDLE`이 연속으로 일정 횟수 관측되면(기본 4회) 다음 수신 세션으로 전환
 - STT 실패/불일치 시 재시도 쿨다운(기본 4초)
 - 수락 성공 직후 감지 재트리거 방지 holdoff(기본 20초, `POST_ACCEPT_HOLDOFF_SECONDS`)
+- 발신자 이름 추정 시 TTS 기본 문구:
+  - `OOO에게 영상통화가 왔습니다. 받으시려면 '전화받아'를 말씀해주세요.`
+  - 템플릿 변경: `ANNOUNCE_TEXT_CALLER_TEMPLATE`
+- TTS/STT 동시 처리:
+  - 기본값 `TTS_ASYNC=1`로 TTS 재생 중에도 STT 전사 시도 가능
+  - 필요 시 동기 모드: `TTS_ASYNC=0`
 
 ## 튜닝 포인트
 

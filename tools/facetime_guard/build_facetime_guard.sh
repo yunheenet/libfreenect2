@@ -12,6 +12,7 @@ mkdir -p "${OUT_DIR}"
 clang -O2 -fobjc-arc \
   -framework Foundation \
   -framework ApplicationServices \
+  -weak_framework Vision \
   "${SRC}" \
   -o "${OUT}"
 

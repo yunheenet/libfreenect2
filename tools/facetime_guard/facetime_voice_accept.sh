@@ -11,7 +11,9 @@ SHORTCUT_NAME="${SHORTCUT_NAME:-GamjaListenKeyword}"
 POLL_SECONDS="${POLL_SECONDS:-0.7}"
 COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-8}"
 ENABLE_TTS="${ENABLE_TTS:-1}"
+TTS_ASYNC="${TTS_ASYNC:-1}"
 ANNOUNCE_TEXT="${ANNOUNCE_TEXT:-영상통화가 왔습니다. 받으시려면 '전화받아'를 말씀해주세요.}"
+ANNOUNCE_TEXT_CALLER_TEMPLATE="${ANNOUNCE_TEXT_CALLER_TEMPLATE:-%s에게 영상통화가 왔습니다. 받으시려면 '전화받아'를 말씀해주세요.}"
 DETECT_DEBUG="${DETECT_DEBUG:-0}"
 RING_CLEAR_IDLE_COUNT="${RING_CLEAR_IDLE_COUNT:-4}"
 ATTEMPT_COOLDOWN_SECONDS="${ATTEMPT_COOLDOWN_SECONDS:-4}"
@@ -31,7 +33,7 @@ Options:
 
 Environment overrides:
   KEYWORD, SHORTCUT_NAME, POLL_SECONDS, COOLDOWN_SECONDS, ENABLE_TTS, ANNOUNCE_TEXT, DETECT_DEBUG,
-  RING_CLEAR_IDLE_COUNT, ATTEMPT_COOLDOWN_SECONDS, POST_ACCEPT_HOLDOFF_SECONDS
+  TTS_ASYNC, ANNOUNCE_TEXT_CALLER_TEMPLATE, RING_CLEAR_IDLE_COUNT, ATTEMPT_COOLDOWN_SECONDS, POST_ACCEPT_HOLDOFF_SECONDS
 USAGE
 }
 
@@ -87,12 +89,65 @@ normalize_text() {
   printf '%s' "$1" | tr -d '[:space:]'
 }
 
+clean_caller() {
+  local caller="$1"
+  caller="${caller//$'\t'/ }"
+  caller="${caller//$'\n'/ }"
+  caller="$(printf '%s' "${caller}" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+  if [[ -z "${caller}" || "${caller}" == "UNKNOWN" ]]; then
+    printf ''
+    return
+  fi
+  printf '%s' "${caller}"
+}
+
+build_announce_text() {
+  local caller="$1"
+  if [[ -n "${caller}" ]]; then
+    printf "${ANNOUNCE_TEXT_CALLER_TEMPLATE}" "${caller}"
+  else
+    printf '%s' "${ANNOUNCE_TEXT}"
+  fi
+}
+
+tts_pid=""
+
+stop_tts() {
+  if [[ -n "${tts_pid}" ]] && kill -0 "${tts_pid}" >/dev/null 2>&1; then
+    kill "${tts_pid}" >/dev/null 2>&1 || true
+    wait "${tts_pid}" 2>/dev/null || true
+  fi
+  tts_pid=""
+}
+
+start_tts() {
+  local text="$1"
+  if [[ "${ENABLE_TTS}" != "1" ]]; then
+    return
+  fi
+  if [[ "${TTS_ASYNC}" == "1" ]]; then
+    stop_tts
+    say "${text}" >/dev/null 2>&1 &
+    tts_pid="$!"
+  else
+    say "${text}" || true
+  fi
+}
+
+cleanup() {
+  stop_tts
+}
+
+trap cleanup EXIT INT TERM
+
 ring_latched=0
 ring_session_key=""
 handled_in_session=0
 idle_streak=0
 next_attempt_at=0
 post_accept_holdoff_until=0
+session_click_x=""
+session_click_y=""
 
 echo "FaceTime guard started."
 echo "Keyword='${KEYWORD}' Shortcut='${SHORTCUT_NAME}' Poll=${POLL_SECONDS}s"
@@ -135,6 +190,9 @@ while true; do
       ring_session_key=""
       handled_in_session=0
       next_attempt_at=0
+      session_click_x=""
+      session_click_y=""
+      stop_tts
     fi
     sleep "${POLL_SECONDS}"
     continue
@@ -142,10 +200,11 @@ while true; do
 
   if [[ "${detect_line}" == RINGING$'\t'* ]]; then
     idle_streak=0
-    IFS=$'\t' read -r state wid owner click_x click_y green_count red_count hint source <<< "${detect_line}"
+    IFS=$'\t' read -r state wid owner click_x click_y green_count red_count hint source caller_raw <<< "${detect_line}"
     if [[ -z "${source}" ]]; then
       source="UNKNOWN"
     fi
+    caller="$(clean_caller "${caller_raw:-}")"
 
     event_key="${source}:${owner}:${wid}"
     if [[ "${ring_latched}" -eq 0 || "${event_key}" != "${ring_session_key}" ]]; then
@@ -153,11 +212,17 @@ while true; do
       ring_session_key="${event_key}"
       handled_in_session=0
       next_attempt_at=0
-      echo "Incoming detected: wid=${wid} owner=${owner} source=${source} green=${green_count} red=${red_count} hint=${hint}"
+      session_click_x="${click_x}"
+      session_click_y="${click_y}"
+      echo "Incoming detected: wid=${wid} owner=${owner} source=${source} green=${green_count} red=${red_count} hint=${hint} caller='${caller:-unknown}' locked_click=(${session_click_x},${session_click_y})"
 
-      if [[ "${ENABLE_TTS}" == "1" ]]; then
-        say "${ANNOUNCE_TEXT}" || true
-      fi
+      start_tts "$(build_announce_text "${caller}")"
+    fi
+
+    # Keep click target stable within one ring session to avoid centroid jitter.
+    if [[ -z "${session_click_x}" || -z "${session_click_y}" ]]; then
+      session_click_x="${click_x}"
+      session_click_y="${click_y}"
     fi
 
     if [[ ${handled_in_session} -eq 1 ]]; then
@@ -180,7 +245,9 @@ while true; do
     else
       echo "Transcript: ${transcript}"
       if [[ "$(normalize_text "${transcript}")" == *"$(normalize_text "${KEYWORD}")"* ]]; then
-        if "${BIN}" --click "${click_x}" "${click_y}" >/dev/null 2>&1; then
+        stop_tts
+        echo "Clicking locked point: (${session_click_x},${session_click_y})"
+        if "${BIN}" --click "${session_click_x}" "${session_click_y}" >/dev/null 2>&1; then
           echo "Accepted call by voice keyword."
           handled_in_session=1
           next_attempt_at=$((now_ts + COOLDOWN_SECONDS))
