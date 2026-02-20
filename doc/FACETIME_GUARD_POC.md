@@ -15,6 +15,7 @@
 - `/Users/yuni/Dev/libfreenect2/tools/facetime_guard/facetime_guard.m`
 - `/Users/yuni/Dev/libfreenect2/tools/facetime_guard/build_facetime_guard.sh`
 - `/Users/yuni/Dev/libfreenect2/tools/facetime_guard/facetime_voice_accept.sh`
+- `/Users/yuni/Dev/libfreenect2/tools/facetime_guard/run_vllm_stt_server.sh`
 
 ## 권한
 
@@ -116,6 +117,57 @@ DETECT_DEBUG=1 ./tools/facetime_guard/facetime_voice_accept.sh --no-tts
 - TTS/STT 동시 처리:
   - 기본값 `TTS_ASYNC=1`로 TTS 재생 중에도 STT 전사 시도 가능
   - 필요 시 동기 모드: `TTS_ASYNC=0`
+  - TTS 에코 억제:
+    - 안내 문구와 유사한 전사는 자동 무시(`SUPPRESS_ANNOUNCE_ECHO=1`)
+    - TTS 재생 중 비키워드 전사는 빠른 재시도(`ATTEMPT_COOLDOWN_DURING_TTS_SECONDS`, 기본 1초)
+    - 빈 전사는 짧은 쿨다운(`ATTEMPT_COOLDOWN_EMPTY_SECONDS`, 기본 1초)
+- STT 백엔드:
+  - `STT_BACKEND=shortcuts` (기존)
+  - `STT_BACKEND=vllm` (권장: TTS/STT 동시 처리 안정화)
+  - `vllm` 요구사항: `ffmpeg`, `curl`, `python3`, 로컬 vllm-mlx 서버(`/v1/audio/transcriptions`)
+  - STT 프로필:
+    - `ko-fast` -> `whisper-large-v3-turbo` (기본, 한국어 권장)
+    - `ko-accurate` -> `whisper-large-v3` (정확도 우선)
+    - `ko-lite` -> `whisper-small` (경량)
+    - `en-fast` -> `parakeet` (영어 전용)
+  - 주요 변수:
+    - `VLLM_BASE_URL` (기본 `http://127.0.0.1:8000`)
+    - `VLLM_STT_PROFILE` (기본 `ko-fast`)
+    - `VLLM_STT_MODEL` (`--stt-model`로 명시 시 프로필보다 우선)
+    - `VLLM_STT_LANGUAGE` (기본 `ko`)
+    - `VLLM_AUDIO_DEVICE` (기본 `0`, avfoundation 오디오 인덱스)
+    - `VLLM_CAPTURE_SECONDS` (기본 `2.5`)
+- 수신 성공 판정:
+  - 단순 클릭 성공을 수신 성공으로 보지 않음
+  - 클릭 후 `--detect` 재확인에서 `RINGING` 해제 연속 관측 시에만 성공 처리
+  - 튜닝: `ACCEPT_VERIFY_TIMEOUT_SECONDS`, `ACCEPT_VERIFY_POLL_SECONDS`, `ACCEPT_VERIFY_CLEAR_COUNT`
+
+vLLM 의존성 설치 예시:
+
+```bash
+cd /Users/yuni/Dev/libfreenect2
+brew install ffmpeg python@3.12 espeak-ng
+python3 -m venv .venv-vllm
+source .venv-vllm/bin/activate
+pip install -U pip
+pip install "vllm-mlx==0.2.6" "mlx-audio==0.3.0rc1" "transformers==5.0.0" "tiktoken"
+```
+
+vLLM 서버 실행(모델 선택 포함):
+
+```bash
+cd /Users/yuni/Dev/libfreenect2
+./tools/facetime_guard/run_vllm_stt_server.sh --profile ko-fast
+```
+
+`--profile ko-accurate`/`--profile ko-lite`로 변경 가능.
+
+FaceTime Guard 실행 예시:
+
+```bash
+cd /Users/yuni/Dev/libfreenect2
+STT_BACKEND=vllm TTS_ASYNC=1 VLLM_STT_PROFILE=ko-fast VLLM_BASE_URL=http://127.0.0.1:8000 ./tools/facetime_guard/facetime_voice_accept.sh
+```
 
 ## 튜닝 포인트
 
